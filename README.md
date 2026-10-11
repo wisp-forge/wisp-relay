@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="wisp-relay-p.png" alt="wisp-relay">
+  <img src="wisp-relay-p.png" alt="wisp-relay" width="50%">
 </p>
 
 # wisp-relay — Expose any frontier LLM as a local endpoint
@@ -38,15 +38,13 @@ The core strength of wisp-relay is that it abstracts the "where" away from the "
 2. **Point:** Tell your client application (like a code editor, a chat UI, or a script) to use `http://localhost:35673/v1/chat/completions`.
 3. **Go:** The client sends an OpenAI-format request to wisp-relay. wisp-relay forwards it to your chosen upstream and returns the response. No code changes needed on your client side.
 
-![Screenshot: wisp-relay log output showing a request being forwarded](docs/screenshot-log.png)
+<p align="center">
+  <img src="selection.png" alt="wisp-relay">
+</p>
 
-![Screenshot: A client app's settings page showing the base URL set to localhost:35673](docs/screenshot-client.png)
-
----
-
-## Video Demo
-
-*[Embed a short screen recording here showing the setup and a successful request being made]*
+<p align="center">
+  <img src="deepseek.png" alt="wisp-relay">
+</p>
 
 ---
 
