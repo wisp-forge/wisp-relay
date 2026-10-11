@@ -39,11 +39,11 @@ The core strength of wisp-relay is that it abstracts the "where" away from the "
 3. **Go:** The client sends an OpenAI-format request to wisp-relay. wisp-relay forwards it to your chosen upstream and returns the response. No code changes needed on your client side.
 
 <p align="center">
-  <img src="selection.png" alt="wisp-relay">
+  <img src="docs/selection.png" alt="wisp-relay">
 </p>
 
 <p align="center">
-  <img src="deepseek.png" alt="wisp-relay">
+  <img src="docs/deepseek.png" alt="wisp-relay">
 </p>
 
 ---
