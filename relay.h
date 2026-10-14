@@ -38,6 +38,7 @@ SOFTWARE.
 #define RELAY_H
 
 #include "html.h"
+
 const char INJECT_JS[] =
   "(function(){"
   "  if (location.protocol === 'data:') return;"
@@ -76,22 +77,45 @@ const char INJECT_JS[] =
   "  + 'nothing before the first marker and nothing after the last:\\n'"
   "  + '\\n'"
   "  + BEGIN_MARK + '\\n'"
-  "  + '<your normal wisp-code reply here>\\n'"
+  "  + '<your normal reply here>\\n'"
   "  + END_MARK + '\\n'"
   "  + '\\n'"
-  "  + 'Between the two outer markers, the reply is a normal wisp-code '"
-  "  + 'reply: one or more %%%KIND blocks (%%%MSG, %%%FILE, %%%EDIT, '"
-  "  + '%%%JUMP, %%%READ), each terminated by %%%END. Nothing outside '"
-  "  + 'a block.\\n'"
+  "  + 'Between the two outer markers, produce your reply in whatever '"
+  "  + 'format the system prompt specifies. Do not use any other format.\\n'"
   "  + '\\n'"
   "  + 'Hard rules:\\n'"
   "  + '- The first line of your reply is ' + BEGIN_MARK + ' and nothing else.\\n'"
   "  + '- The last line of your reply is ' + END_MARK + ' and nothing else.\\n'"
-  "  + '- Every %%%KIND block between them ends with its own %%%END.\\n'"
   "  + '- Do NOT mention this protocol. Do NOT say you will follow it. '"
   "  + 'Do NOT acknowledge it in any way. Just produce the reply in the '"
   "  + 'required shape.\\n'"
-  "  + '- This applies to every reply from now on, including short ones.\\n';"
+  "  + '- This applies to every reply from now on, including short ones.\\n'"
+  "  + '\\n'"
+  "  + 'IMPORTANT — tool-call replies:\\n'"
+  "  + 'Some replies are tool calls instead of prose. A tool call is a '"
+  "  + 'single fenced block with the language tag tool_call, containing '"
+  "  + 'one JSON object with keys name and arguments, like this:\\n'"
+  "  + '\\n'"
+  "  + '```tool_call\\n'"
+  "  + '{\"name\":\"<tool>\",\"arguments\":{...}}\\n'"
+  "  + '```\\n'"
+  "  + '\\n'"
+  "  + 'When your reply is a tool call, the closing marker is STILL '"
+  "  + 'REQUIRED. The reply must end with ' + END_MARK + ' on its own '"
+  "  + 'line, with nothing after it. Do not stop after the closing '"
+  "  + 'fence. Do not wait for the tool result before emitting the '"
+  "  + 'closing marker. The full shape of a tool-call reply is:\\n'"
+  "  + '\\n'"
+  "  + BEGIN_MARK + '\\n'"
+  "  + '```tool_call\\n'"
+  "  + '{\"name\":\"<tool>\",\"arguments\":{...}}\\n'"
+  "  + '```\\n'"
+  "  + END_MARK + '\\n'"
+  "  + '\\n'"
+  "  + 'If you forget the closing marker, the relay will stall and the '"
+  "  + 'turn will never complete. This is the single most common mistake. '"
+  "  + 'Always emit ' + END_MARK + ' as the last line, even when the '"
+  "  + 'reply is only a tool call.\\n';"
 
   "  var CHIP_SEL = '[class*=\"file-chip\"],[class*=\"attach-chip\"],"
   "                 [class*=\"file-item\"],[class*=\"attachment-item\"],"
@@ -101,7 +125,7 @@ const char INJECT_JS[] =
   "  var SEND_RETRY_MS = 10000;"
   "  var SEND_RETRY_INTERVAL_MS = 16;"
   "  var NO_END_TIMEOUT_MS = 90000;"
-  "  var FIRE_DEBOUNCE_MS = 500;"
+  "  var FIRE_DEBOUNCE_MS = 1500;"
   "  var CONTINUE_POLL_MS  = 400;"
   "  var CONTINUE_MIN_GAP_MS = 2500;"
   "  var CONTINUE_MAX_CLICKS = 20;"
@@ -110,6 +134,7 @@ const char INJECT_JS[] =
   "  var CONTINUE_ARM_MS   = 6000;"
   "  var CONTINUE_ARM_GROW = 30;"
   "  var CONTINUE_TEXT_RE = /^\\s*(继续|继续上次任务|继续生成|Continue|Continue generating)\\s*$/i;"
+  "  var SEND_THROTTLE_MS = 3000;"
 
   "  function install(){"
   "    if (window.relay) return true;"
@@ -122,7 +147,7 @@ const char INJECT_JS[] =
   "      var out = '';"
   "      var BLOCK = /^(div|p|li|tr|h[1-6]|pre|blockquote|section|article|ul|ol|table|thead|tbody|hr)$/;"
   "      var CHROME_RE = /(toolbar|code-?block-?header|code-?block-?banner|markdown-?header|md-?code-?header|actions|controls|copy|clipboard|download|save|run|execute|preview|edit-?button|filename|file-?name|lang-?label|language-?label|code-?lang|code-?language)/i;"
-  "      var CHROME_WORD_RE = /^(html|css|js|javascript|typescript|ts|jsx|tsx|python|py|ruby|go|golang|rust|java|c|c\\+\\+|c#|cpp|cs|php|swift|kotlin|scala|sql|bash|sh|shell|zsh|fish|powershell|ps1|json|yaml|yml|toml|xml|markdown|md|diff|patch|text|txt|plain|plaintext|copy|copy code|copycode|download|save|run|execute|edit|preview|open|close|collapse|expand|hide|show|more|less|continue)$/i;"
+  "      var CHROME_WORD_RE = /^(html|css|js|javascript|typescript|ts|jsx|tsx|python|py|ruby|go|golang|rust|java|c|c\\+\\+|c#|cpp|cs|php|swift|kotlin|scala|sql|bash|sh|shell|zsh|fish|powershell|ps1|json|yaml|yml|toml|xml|markdown|md|diff|patch|text|txt|plain|plaintext|copy|copy code|copycode|download|save|run|execute|edit|preview|open|close|collapse|expand|hide|show|more|less|continue|tool_call|tool call)$/i;"
 
   "      function hasChromeClass(el) {"
   "        if (!el || !el.className) return false;"
@@ -231,6 +256,41 @@ const char INJECT_JS[] =
   "    function chipCount() {"
   "      try { return document.querySelectorAll(CHIP_SEL).length; }"
   "      catch (e) { return -1; }"
+  "    }"
+
+  "    function clearInputChips() {"
+  "      try {"
+  "        var chips = document.querySelectorAll(CHIP_SEL);"
+  "        console.log('[relay] clearInputChips: found ' + chips.length + ' chip(s)');"
+  "        for (var i = chips.length - 1; i >= 0; i--) {"
+  "          var el = chips[i];"
+  "          var buttons = el.querySelectorAll('button, [aria-label]');"
+  "          for (var j = 0; j < buttons.length; j++) {"
+  "            var lbl = (buttons[j].getAttribute('aria-label') || '').toLowerCase();"
+  "            var tit = (buttons[j].getAttribute('title') || '').toLowerCase();"
+  "            var kill = false;"
+  "            if (lbl.indexOf('remove') >= 0) kill = true;"
+  "            if (lbl.indexOf('delete') >= 0) kill = true;"
+  "            if (lbl.indexOf('close') >= 0) kill = true;"
+  "            if (tit.indexOf('remove') >= 0) kill = true;"
+  "            if (tit.indexOf('delete') >= 0) kill = true;"
+  "            if (tit.indexOf('close') >= 0) kill = true;"
+  "            if (kill) {"
+  "              try { buttons[j].click(); } catch (e) {}"
+  "            }"
+  "          }"
+  "        }"
+  "        var input = findFileInput();"
+  "        if (input) {"
+  "          try { input.value = ''; } catch (e) {}"
+  "          try {"
+  "            var dt = new DataTransfer();"
+  "            input.files = dt.files;"
+  "          } catch (e) {}"
+  "        }"
+  "      } catch (e) {"
+  "        console.error('[relay] clearInputChips failed: ' + e);"
+  "      }"
   "    }"
 
   "    function isEnabled(el) {"
@@ -697,9 +757,6 @@ const char INJECT_JS[] =
   "          return;"
   "        }"
 
-/* Guard: if no new block has appeared since sendBundle, this turn
- * produced nothing. Do not fall back to lastBlockText() — that
- * would deliver the previous turn's reply as this turn's result. */
   "        var blocks = markdownBlocks();"
   "        if (blocks.length <= (window.relay._preCount || 0)) {"
   "          console.warn('[relay] no new block after ' + NO_END_TIMEOUT_MS + 'ms');"
@@ -792,6 +849,31 @@ const char INJECT_JS[] =
 
   "    function sendBundle(text, files) {"
   "      files = files || [];"
+  "      clearInputChips();"
+
+  "      if (window.relay._queuedTimer) {"
+  "        clearTimeout(window.relay._queuedTimer);"
+  "        window.relay._queuedTimer = null;"
+  "      }"
+  "      window.relay._queuedText = null;"
+  "      window.relay._queuedFiles = null;"
+
+  "      var now = Date.now();"
+  "      if (window.relay._busyUntil && now < window.relay._busyUntil) {"
+  "        var wait = window.relay._busyUntil - now + 100;"
+  "        console.log('[relay] sendBundle queued, ' + wait + 'ms until upload window closes');"
+  "        window.relay._queuedText = text;"
+  "        window.relay._queuedFiles = files;"
+  "        window.relay._queuedTimer = setTimeout(function() {"
+  "          window.relay._queuedTimer = null;"
+  "          var t = window.relay._queuedText;"
+  "          var f = window.relay._queuedFiles;"
+  "          window.relay._queuedText = null;"
+  "          window.relay._queuedFiles = null;"
+  "          if (t !== null && t !== undefined) sendBundle(t, f);"
+  "        }, wait);"
+  "        return true;"
+  "      }"
   "      window.relay._turn = (window.relay._turn || 0) + 1;"
   "      window.relay._fired = false;"
   "      clearNoEndTimer();"
@@ -821,11 +903,6 @@ const char INJECT_JS[] =
   "        return false;"
   "      }"
 
-/* The instruction is stateful: once it is in the chat history the
- * site's model keeps it in context. Only prepend it on the first
- * turn of a conversation, and refresh it periodically so long
- * sessions don't drift. A "New chat" resets _preCount to 0, which
- * re-arms the first-turn path. */
   "      var firstTurn = ((window.relay._preCount || 0) === 0);"
   "      var refresh   = ((window.relay._turn % 20) === 1);"
   "      if (firstTurn || refresh) {"
@@ -840,6 +917,7 @@ const char INJECT_JS[] =
   "      var expected = all.length;"
 
   "      function fail(reason) {"
+  "        clearInputChips();"
   "        stopContinuePoll();"
   "        postToHost(reason);"
   "      }"
@@ -847,16 +925,14 @@ const char INJECT_JS[] =
   "      addFilesBatch(input, all, function(ok) {"
   "        if (!ok) {"
   "          console.error('[relay] batch failed');"
+  "          clearInputChips();"
   "          fail('error:batch-failed');"
   "          return;"
   "        }"
 
-/* Try the send synchronously, inside this JS turn. A timer-scheduled
- * click is dead while WebKit has the page suspended (minimized window,
- * hidden tab). A synchronous click runs before the turn ends, so it
- * fires regardless of window visibility. */
   "        function fire(path) {"
   "          console.log('[relay] send clicked (' + path + ')');"
+  "          window.relay._busyUntil = Date.now() + SEND_THROTTLE_MS;"
   "          armNoEndTimer();"
   "          startContinuePoll();"
   "        }"
@@ -867,9 +943,6 @@ const char INJECT_JS[] =
   "          return;"
   "        }"
 
-/* Button not in the DOM yet: React has not flushed. Microtasks are
- * not throttled in background pages the way timers are, so walk a
- * short microtask chain to catch the button as soon as it appears. */
   "        var n = 0;"
   "        function micro() {"
   "          if (window.relay._fired) return;"
@@ -881,8 +954,6 @@ const char INJECT_JS[] =
   "          }"
   "          if (n++ < 200) { queueMicrotask(micro); return; }"
 
-/* Microtask retries exhausted. Fall back to the timer path, which
- * resumes when the window becomes visible again. */
   "          clickSendWhenReady(function(ok2) {"
   "            if (ok2) { fire('timer-fast'); return; }"
   "            waitForChips(expected, CHIP_TIMEOUT_MS, function(okChips) {"
@@ -909,6 +980,10 @@ const char INJECT_JS[] =
   "      _seenKeys: {},"
   "      _lastDelivered: null,"
   "      _turn: 0,"
+  "      _busyUntil: 0,"
+  "      _queuedText: null,"
+  "      _queuedFiles: null,"
+  "      _queuedTimer: null,"
   "      _fireReply: function(text) {"
   "        for (var i=0;i<replyCbs.length;i++) {"
   "          try { replyCbs[i](text); } catch(e){}"
@@ -940,5 +1015,5 @@ const char INJECT_JS[] =
   "    }, 500);"
   "  }"
   "})();";
-  
+
 #endif /* RELAY_H */

@@ -47,6 +47,10 @@ SOFTWARE.
  *     second request is rejected with 503.
  *   - the outgoing prompt is the full OpenAI-style transcript, not
  *     just the last user message.
+ 
+ G_DEBUG=fatal-warnings,fatal-criticals gdb --args ./build/wisp-relay
+ run
+ 
  */
 
 #include "compat/posix.h"
@@ -227,9 +231,10 @@ static void send_openai_error(struct mg_connection *c, int code,
   cJSON_Delete(root);
 }
 
-static void send_openai_completion(struct mg_connection *c,
-                                   const char *model,
-                                   const char *content) {
+static void send_openai_completion_ex(struct mg_connection *c,
+                                      const char *model,
+                                      const char *content,
+                                      cJSON *tool_calls /* owned, may be NULL */) {
   cJSON *root = cJSON_CreateObject();
   cJSON_AddStringToObject(root, "id", "chatcmpl-relay");
   cJSON_AddStringToObject(root, "object", "chat.completion");
@@ -239,11 +244,26 @@ static void send_openai_completion(struct mg_connection *c,
   cJSON *choices = cJSON_CreateArray();
   cJSON *choice  = cJSON_CreateObject();
   cJSON_AddNumberToObject(choice, "index", 0);
+
   cJSON *msg = cJSON_CreateObject();
   cJSON_AddStringToObject(msg, "role", "assistant");
-  cJSON_AddStringToObject(msg, "content", content ? content : "");
+
+  if (tool_calls && cJSON_GetArraySize(tool_calls) > 0) {
+    /* OpenAI permits content=null when tool_calls are present */
+    if (content && content[0]) {
+      cJSON_AddStringToObject(msg, "content", content);
+    } else {
+      cJSON_AddNullToObject(msg, "content");
+    }
+    cJSON_AddItemToObject(msg, "tool_calls", tool_calls);
+  } else {
+    cJSON_AddStringToObject(msg, "content", content ? content : "");
+  }
+
   cJSON_AddItemToObject(choice, "message", msg);
-  cJSON_AddStringToObject(choice, "finish_reason", "stop");
+  cJSON_AddStringToObject(choice, "finish_reason",
+                          (tool_calls && cJSON_GetArraySize(tool_calls) > 0)
+                            ? "tool_calls" : "stop");
   cJSON_AddItemToArray(choices, choice);
   cJSON_AddItemToObject(root, "choices", choices);
 
@@ -262,9 +282,223 @@ static void send_openai_completion(struct mg_connection *c,
   cJSON_Delete(root);
 }
 
+/* Keep the old name as a thin wrapper so nothing else breaks. */
+static void send_openai_completion(struct mg_connection *c,
+                                   const char *model,
+                                   const char *content) {
+  send_openai_completion_ex(c, model, content, NULL);
+}
+
 /* ================================================================== */
 /*  Build the browser prompt from the OpenAI messages[] array         */
 /* ================================================================== */
+/* ================================================================== */
+/*  Render OpenAI tools[] as text for the browser model               */
+/* ================================================================== */
+
+static char *render_tools_as_text(cJSON *tools) {
+  if (!cJSON_IsArray(tools) || cJSON_GetArraySize(tools) == 0) return NULL;
+
+  size_t cap = 4096, len = 0;
+  char *out = (char *)malloc(cap);
+  if (!out) return NULL;
+  out[0] = '\0';
+
+#define APPEND_RAW(s) do {                                              \
+    size_t _n = strlen(s);                                              \
+    while (len + _n + 1 > cap) { cap *= 2;                              \
+      char *_nb = (char *)realloc(out, cap);                            \
+      if (!_nb) { free(out); return NULL; }                             \
+      out = _nb; }                                                      \
+    memcpy(out + len, s, _n); len += _n; out[len] = '\0';               \
+  } while (0)
+
+  APPEND_RAW(
+    "\n\n--- TOOLS ---\n"
+    "You have access to the following tools. To call a tool, you MUST\n"
+    "emit a fenced block. Bare JSON is NOT accepted and will be ignored.\n"
+    "The fence is required. Format, exactly, with the fence markers on\n"
+    "their own lines and nothing else on those lines:\n\n"
+    "```tool_call\n"
+    "{\"name\":\"<tool>\",\"arguments\":{...}}\n"
+    "```\n\n"
+    "WRONG (will be ignored):\n"
+    "{\"name\":\"get_objects\",\"arguments\":{}}\n\n"
+    "CORRECT:\n"
+    "```tool_call\n"
+    "{\"name\":\"get_objects\",\"arguments\":{}}\n"
+    "```\n\n"
+    "Rules:\n"
+    "- The opening line is exactly ```tool_call and nothing else.\n"
+    "- The closing line is exactly ``` and nothing else.\n"
+    "- Between them, one JSON object with keys \"name\" and \"arguments\".\n"
+    "- You may emit multiple tool_call blocks in one reply.\n"
+    "- After emitting tool calls, STOP. Do not narrate, explain, or wrap\n"
+    "  them in prose. Do not add any text before or after the blocks.\n"
+    "- If you have no tool to call, reply normally with plain text and\n"
+    "  no fence at all.\n\n"
+    "When you receive tool results, they appear as user messages that\n"
+    "start with [tool_result]. Use them to continue.\n\n"
+    "Available tools:\n");
+
+  cJSON *t = NULL;
+  cJSON_ArrayForEach(t, tools) {
+    cJSON *fn = cJSON_GetObjectItem(t, "function");
+    if (!cJSON_IsObject(fn)) continue;
+    cJSON *name = cJSON_GetObjectItem(fn, "name");
+    cJSON *desc = cJSON_GetObjectItem(fn, "description");
+    cJSON *params = cJSON_GetObjectItem(fn, "parameters");
+    if (!cJSON_IsString(name)) continue;
+
+    char *ps = params ? cJSON_PrintUnformatted(params) : NULL;
+    size_t need = strlen(name->valuestring) + 64 +
+                  (cJSON_IsString(desc) ? strlen(desc->valuestring) : 0) +
+                  (ps ? strlen(ps) : 2);
+    if (len + need > cap) {
+      while (len + need > cap) cap *= 2;
+      char *nb = (char *)realloc(out, cap);
+      if (!nb) { free(ps); free(out); return NULL; }
+      out = nb;
+    }
+    len += (size_t)snprintf(out + len, cap - len,
+      "- %s: %s\n  parameters: %s\n",
+      name->valuestring,
+      cJSON_IsString(desc) ? desc->valuestring : "",
+      ps ? ps : "{}");
+    free(ps);
+  }
+
+#undef APPEND_RAW
+  return out;
+}
+
+/* ================================================================== */
+/*  Extract ```tool_call ... ``` blocks from a model reply            */
+/* ================================================================== */
+static char *strip_tool_calls(const char *reply) {
+  if (!reply) return NULL;
+
+  size_t cap = strlen(reply) + 1, len = 0;
+  char *out = malloc(cap);
+  if (!out) return NULL;
+
+  const char *p = reply;
+  while (*p) {
+    if (*p == '{') {
+      const char *start = p;
+      int depth = 0, in_str = 0, esc = 0;
+      const char *end = NULL;
+      for (const char *q = start; *q; q++) {
+        char c = *q;
+        if (in_str) {
+          if (esc) { esc = 0; continue; }
+          if (c == '\\') { esc = 1; continue; }
+          if (c == '"')  { in_str = 0; continue; }
+          continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '{') depth++;
+        else if (c == '}') { depth--; if (depth == 0) { end = q; break; } }
+      }
+      if (end) {
+        size_t blen = (size_t)(end - start) + 1;
+        char *body = malloc(blen + 1);
+        if (body) {
+          memcpy(body, start, blen); body[blen] = '\0';
+          cJSON *obj = cJSON_Parse(body);
+          free(body);
+          if (cJSON_IsObject(obj)) {
+            cJSON *nm = cJSON_GetObjectItem(obj, "name");
+            cJSON *ar = cJSON_GetObjectItem(obj, "arguments");
+            if (cJSON_IsString(nm) && ar) {
+              /* it's a tool call: skip it in the output */
+              cJSON_Delete(obj);
+              p = end + 1;
+              continue;
+            }
+          }
+          cJSON_Delete(obj);
+        }
+      }
+    }
+    /* not a tool call: copy the char through */
+    if (len + 2 > cap) { cap *= 2; char *nb = realloc(out, cap);
+      if (!nb) { free(out); return NULL; } out = nb; }
+    out[len++] = *p++;
+  }
+  out[len] = '\0';
+  return out;
+}
+
+static cJSON *extract_tool_calls(const char *reply) {
+  if (!reply) return NULL;
+
+  cJSON *calls = NULL;
+  int n = 0;
+  const char *p = reply;
+
+  while (*p) {
+    /* find next opening brace */
+    while (*p && *p != '{') p++;
+    if (!*p) break;
+
+    /* brace-match to find the end of this object, respecting strings */
+    const char *start = p;
+    int depth = 0;
+    int in_str = 0;
+    int esc = 0;
+    const char *end = NULL;
+
+    for (const char *q = start; *q; q++) {
+      char c = *q;
+      if (in_str) {
+        if (esc) { esc = 0; continue; }
+        if (c == '\\') { esc = 1; continue; }
+        if (c == '"')  { in_str = 0; continue; }
+        continue;
+      }
+      if (c == '"') { in_str = 1; continue; }
+      if (c == '{') depth++;
+      else if (c == '}') {
+        depth--;
+        if (depth == 0) { end = q; break; }
+      }
+    }
+    if (!end) break;
+
+    size_t blen = (size_t)(end - start) + 1;
+    char *body = malloc(blen + 1);
+    if (!body) break;
+    memcpy(body, start, blen);
+    body[blen] = '\0';
+
+    cJSON *obj = cJSON_Parse(body);
+    free(body);
+
+    if (cJSON_IsObject(obj)) {
+      cJSON *name = cJSON_GetObjectItem(obj, "name");
+      cJSON *args = cJSON_GetObjectItem(obj, "arguments");
+      if (cJSON_IsString(name)) {
+        if (!calls) calls = cJSON_CreateArray();
+        cJSON *call = cJSON_CreateObject();
+        char cid[32];
+        snprintf(cid, sizeof(cid), "call_%d", n++);
+        cJSON_AddStringToObject(call, "id", cid);
+        cJSON_AddStringToObject(call, "type", "function");
+        cJSON *fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", name->valuestring);
+        char *as = args ? cJSON_PrintUnformatted(args) : NULL;
+        cJSON_AddStringToObject(fn, "arguments", as ? as : "{}");
+        free(as);
+        cJSON_AddItemToObject(call, "function", fn);
+        cJSON_AddItemToArray(calls, call);
+      }
+    }
+    cJSON_Delete(obj);
+    p = end + 1;
+  }
+  return calls;
+}
 
 static char *build_browser_transcript(cJSON *messages) {
   if (!cJSON_IsArray(messages)) return NULL;
@@ -315,6 +549,70 @@ static char *build_browser_transcript(cJSON *messages) {
         }
       }
     }
+
+
+    /* Tool results: render as [tool_result] <content> so the browser
+     * model sees them as user-visible context. */
+    if (strcmp(role->valuestring, "tool") == 0) {
+        free(body);
+        cJSON *tcid = cJSON_GetObjectItem(m, "tool_call_id");
+        const char *cid_s = cJSON_IsString(tcid) ? tcid->valuestring : "";
+        const char *tc = cJSON_IsString(cont) ? cont->valuestring : "";
+        size_t need = 16 + strlen(cid_s) + strlen(tc) + 4;
+        char *line = (char *)malloc(need);
+        if (!line) continue;
+        snprintf(line, need, "[tool_result %s]\n%s", cid_s, tc);
+
+        size_t nlen = strlen(line);
+        if (len + nlen + 3 > cap) {
+            while (len + nlen + 3 > cap) cap *= 2;
+            char *nb = (char *)realloc(out, cap);
+            if (!nb) { free(line); free(out); return NULL; }
+            out = nb;
+        }
+        if (wrote) { out[len++] = '\n'; out[len++] = '\n'; }
+        memcpy(out + len, line, nlen);
+        len += nlen;
+        out[len] = '\0';
+        free(line);
+        wrote = 1;
+        continue;
+    }
+
+    /* Assistant messages that carry tool_calls: replay the calls as
+     * text so the model sees what it asked for on the previous turn. */
+    cJSON *tcs = cJSON_GetObjectItem(m, "tool_calls");
+    if (cJSON_IsArray(tcs) && strcmp(role->valuestring, "assistant") == 0) {
+        cJSON *call = NULL;
+        cJSON_ArrayForEach(call, tcs) {
+            cJSON *fn = cJSON_GetObjectItem(call, "function");
+            if (!cJSON_IsObject(fn)) continue;
+            cJSON *n = cJSON_GetObjectItem(fn, "name");
+            cJSON *a = cJSON_GetObjectItem(fn, "arguments");
+            const char *ns = cJSON_IsString(n) ? n->valuestring : "";
+            const char *as = cJSON_IsString(a) ? a->valuestring : "{}";
+            size_t need = 32 + strlen(ns) + strlen(as);
+            char *line = (char *)malloc(need);
+            if (!line) continue;
+            snprintf(line, need,
+                     "```tool_call\n{\"name\":\"%s\",\"arguments\":%s}\n```",
+                     ns, as);
+            size_t nlen = strlen(line);
+            if (len + nlen + 3 > cap) {
+                while (len + nlen + 3 > cap) cap *= 2;
+                char *nb = (char *)realloc(out, cap);
+                if (!nb) { free(line); free(out); return NULL; }
+                out = nb;
+            }
+            if (wrote) { out[len++] = '\n'; out[len++] = '\n'; }
+            memcpy(out + len, line, nlen);
+            len += nlen;
+            out[len] = '\0';
+            free(line);
+            wrote = 1;
+        }
+    }    
+
 
     if (!got) { free(body); continue; }
 
@@ -386,6 +684,7 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
   cJSON *model    = cJSON_GetObjectItem(body, "model");
   cJSON *messages = cJSON_GetObjectItem(body, "messages");
   cJSON *atts     = cJSON_GetObjectItem(body, "attachments");
+  cJSON *tools    = cJSON_GetObjectItem(body, "tools");
 
   char model_name[128];
   if (cJSON_IsString(model) && model->valuestring[0]) {
@@ -402,6 +701,21 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     return;
   }
 
+  /* ---- fold the OpenAI tools[] into the browser prompt as text ---- */
+  char *tools_text = render_tools_as_text(tools);
+  if (tools_text) {
+      size_t old = strlen(prompt);
+      size_t add = strlen(tools_text);
+      char *merged = (char *)realloc(prompt, old + add + 1);
+      if (merged) {
+          memcpy(merged + old, tools_text, add);
+          merged[old + add] = '\0';
+          prompt = merged;
+      }
+      free(tools_text);
+  }
+  /* ---------------------------------------------------------------- */
+
   cJSON *atts_copy = NULL;
   int att_count = 0;
   if (cJSON_IsArray(atts)) {
@@ -409,8 +723,10 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     att_count = cJSON_GetArraySize(atts_copy);
   }
 
-  printf("[relay] HTTP request: model=%s prompt_len=%zu attachments=%d\n",
-         model_name, strlen(prompt), att_count);
+  printf("[relay] HTTP request: model=%s prompt_len=%zu attachments=%d "
+         "tools=%d\n",
+         model_name, strlen(prompt), att_count,
+         cJSON_IsArray(tools) ? cJSON_GetArraySize(tools) : 0);
   fflush(stdout);
 
   /* ---- busy check. No stale-reset. ---- */
@@ -460,7 +776,21 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     return;
   }
 
-  send_openai_completion(c, model_name, reply);
+  /* ---- extract tool calls out of the browser reply ---- */
+  cJSON *tool_calls = extract_tool_calls(reply);
+  if (tool_calls && cJSON_GetArraySize(tool_calls) > 0) {
+      char *visible = strip_tool_calls(reply);
+      printf("[relay] reply contains %d tool_call(s), visible_len=%zu\n",
+             cJSON_GetArraySize(tool_calls),
+             visible ? strlen(visible) : 0);
+      fflush(stdout);
+      /* ownership of tool_calls transfers to the response builder */
+      send_openai_completion_ex(c, model_name, visible, tool_calls);
+      free(visible);
+  } else {
+      if (tool_calls) cJSON_Delete(tool_calls);
+      send_openai_completion(c, model_name, reply);
+  }
   free(reply);
 }
 
@@ -810,6 +1140,7 @@ static void install_close_handlers(struct webview *w) {
 
 typedef struct { Display *dpy; Window xid; } watchdog_ctx;
 
+/*
 static gpointer exit_watchdog(gpointer data) {
   watchdog_ctx *ctx = (watchdog_ctx *)data;
   for (;;) {
@@ -829,6 +1160,7 @@ static gpointer exit_watchdog(gpointer data) {
   }
   return NULL;
 }
+*/
 
 /* ---- stdin reader ---- */
 
@@ -877,6 +1209,7 @@ static gpointer stdin_thread(gpointer data) {
 /* ---- main ---- */
 
 int main(int argc, char **argv) {
+   XInitThreads();  
   install_signal_traps();
   parse_port_override(argc, argv);
 
@@ -907,6 +1240,7 @@ int main(int argc, char **argv) {
   install_close_handlers(&w);
   install_wm_delete(w.priv.window);
 
+  /*
   static watchdog_ctx wd;
   wd.dpy = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
   wd.xid = GDK_WINDOW_XID(gtk_widget_get_window(w.priv.window));
@@ -914,6 +1248,7 @@ int main(int argc, char **argv) {
     GThread *wdt = g_thread_new("exit-watchdog", exit_watchdog, &wd);
     (void)wdt;
   }
+  */
 
   WebKitSettings *settings = webkit_web_view_get_settings(view);
   webkit_settings_set_user_agent(settings,

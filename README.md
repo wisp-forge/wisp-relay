@@ -2,7 +2,11 @@
   <img src="wisp-relay-p.png" alt="wisp-relay" width="50%">
 </p>
 
-# wisp-relay — Expose any frontier LLM as a local endpoint
+<h1 align="center">wisp-relay</h1>
+
+<p align="center">
+  <strong>Expose any frontier LLM as a local endpoint</strong>
+</p>
 
 **Stop being locked into a single API.**
 wisp-relay is a lightweight, local HTTP server that translates the OpenAI API standard into anything you want. Point your favorite coding tools at `http://localhost:35673/v1/chat/completions` and let wisp-relay route the traffic to your actual provider of choice.
@@ -45,6 +49,18 @@ The core strength of wisp-relay is that it abstracts the "where" away from the "
 <p align="center">
   <img src="docs/deepseek.png" alt="wisp-relay">
 </p>
+
+---
+
+## Related
+
+- [**wisp-code-free**](https://github.com/wisp-forge/wisp-code-free) —
+  the free edition. Lightweight, LLM-driven coding agent that runs in any
+  terminal. AGPL-3.0, full source.
+
+- [**wisp-code-pro**](https://github.com/wisp-forge/wisp-code-pro) — the
+  pro edition. Same agent, tuned for long sessions. Paid, with full
+  source under a commercial license.
 
 ---
 
