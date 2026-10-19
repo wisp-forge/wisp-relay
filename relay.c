@@ -50,6 +50,10 @@ SOFTWARE.
  
  G_DEBUG=fatal-warnings,fatal-criticals gdb --args ./build/wisp-relay
  run
+
+ NOTE: If you started in a VScode terminal and got a TLS error do this
+ export GIO_EXTRA_MODULES=/usr/lib/x86_64-linux-gnu/gio/modules/ 
+ wisp-relay
  
  */
 
@@ -87,6 +91,12 @@ SOFTWARE.
  * The listener walks RELAY_HTTP_PORT_RANGE consecutive ports and
  * binds the first free one, so N relay instances can coexist. */
 static int g_relay_port_base = RELAY_HTTP_PORT_BASE;
+
+/* Set to 1 once the --- TOOLS --- preamble has been delivered in this
+ * browser session. Cleared whenever the provider page navigates
+ * (connect or reload), because that wipes the browser's conversation
+ * history and the model forgets the tools. */
+static int g_tools_preamble_sent = 0;
 
 static void parse_port_override(int argc, char **argv) {
   const char *ps = (argc > 1 && argv[1][0]) ? argv[1] : getenv("RELAY_PORT");
@@ -701,18 +711,22 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     return;
   }
 
-  /* ---- fold the OpenAI tools[] into the browser prompt as text ---- */
-  char *tools_text = render_tools_as_text(tools);
-  if (tools_text) {
-      size_t old = strlen(prompt);
-      size_t add = strlen(tools_text);
-      char *merged = (char *)realloc(prompt, old + add + 1);
-      if (merged) {
-          memcpy(merged + old, tools_text, add);
-          merged[old + add] = '\0';
-          prompt = merged;
+  if (!g_tools_preamble_sent && cJSON_IsArray(tools)
+      && cJSON_GetArraySize(tools) > 0) {
+      char *tools_text = render_tools_as_text(tools);
+      if (tools_text) {
+          size_t old = strlen(prompt);
+          size_t add = strlen(tools_text);
+          char *merged = (char *)realloc(prompt, old + add + 1);
+          if (merged) {
+              memcpy(merged + old, tools_text, add);
+              merged[old + add] = '\0';
+              prompt = merged;
+          }
+          free(tools_text);
+          g_tools_preamble_sent = 1;
+          printf("[relay] tools preamble sent (first turn of session)\n");
       }
-      free(tools_text);
   }
   /* ---------------------------------------------------------------- */
 
@@ -1043,6 +1057,7 @@ static void on_external_message(struct webview *w, const char *arg) {
 
   if (strncmp(arg, "connect:", 8) == 0) {
     const char *id = arg + 8;
+    g_tools_preamble_sent = 0;   /* browser history will be wiped */
     for (const provider_t *p = g_providers; p->id; p++) {
       if (strcmp(p->id, id) == 0) {
         printf("[relay] connecting to %s (%s)\n", p->name, p->url);
@@ -1368,6 +1383,7 @@ static void on_external_message(struct webview *w, const char *arg) {
 
   if (strncmp(arg, "connect:", 8) == 0) {
     const char *id = arg + 8;
+    g_tools_preamble_sent = 0;
     for (const provider_t *p = g_providers; p->id; p++) {
       if (strcmp(p->id, id) == 0) {
         printf("[relay] connecting to %s (%s)\n", p->name, p->url);
@@ -1607,6 +1623,7 @@ static void on_external_message(struct webview *w, const char *arg) {
 
   if (strncmp(arg, "connect:", 8) == 0) {
     const char *id = arg + 8;
+    g_tools_preamble_sent = 0;
     for (const provider_t *p = g_providers; p->id; p++) {
       if (strcmp(p->id, id) == 0) {
         printf("[relay] connecting to %s (%s)\n", p->name, p->url);
@@ -1819,6 +1836,7 @@ static void on_external_message(struct webview *w, const char *arg) {
 
   if (strncmp(arg, "connect:", 8) == 0) {
     const char *id = arg + 8;
+    g_tools_preamble_sent = 0;
     for (const provider_t *p = g_providers; p->id; p++) {
       if (strcmp(p->id, id) == 0) {
         printf("[relay] connecting to %s (%s)\n", p->name, p->url);

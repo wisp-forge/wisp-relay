@@ -1,39 +1,3 @@
-/*
-MIT License
-
-Copyright (c) 2026 wisp-code@proton.me
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
-
-
-/*
- * relay.h — data-only header for relay.c
- *
- * Contains:
- *   - INJECT_JS : the browser-side shim injected into every page.
- *   - html.h is included for the provider favicon data used by the
- *     chooser page.
- *
- * Nothing here is executable; relay.c does all the work.
- */
-
 #ifndef RELAY_H
 #define RELAY_H
 
@@ -903,10 +867,12 @@ const char INJECT_JS[] =
   "        return false;"
   "      }"
 
-  "      var firstTurn = ((window.relay._preCount || 0) === 0);"
-  "      var refresh   = ((window.relay._turn % 20) === 1);"
-  "      if (firstTurn || refresh) {"
+  "      var needInstr = (!window.relay._instruction_sent) ||"
+  "                      ((window.relay._turn % 10) === 1);"
+  "      if (needInstr) {"
   "        text = text + INJECT_INSTRUCTION;"
+  "        window.relay._instruction_sent = true;"
+  "        console.log('[relay-shim] INJECT_INSTRUCTION sent, turn=' + window.relay._turn);"
   "      }"
 
   "      var all = [{"
@@ -984,6 +950,7 @@ const char INJECT_JS[] =
   "      _queuedText: null,"
   "      _queuedFiles: null,"
   "      _queuedTimer: null,"
+  "      _instruction_sent: false,"
   "      _fireReply: function(text) {"
   "        for (var i=0;i<replyCbs.length;i++) {"
   "          try { replyCbs[i](text); } catch(e){}"
