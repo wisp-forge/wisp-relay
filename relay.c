@@ -86,11 +86,14 @@ SOFTWARE.
 // http://127.0.0.1:35673/v1/chat/completions
 #define RELAY_HTTP_PORT_BASE   35673
 #define RELAY_HTTP_PORT_RANGE  16      /* try base .. base+15 */
+#define RELAY_HTTP_HOST_DEFAULT "127.0.0.1"
 
-/* Chosen port base. Overridable via argv[1] or RELAY_PORT env var.
- * The listener walks RELAY_HTTP_PORT_RANGE consecutive ports and
- * binds the first free one, so N relay instances can coexist. */
-static int g_relay_port_base = RELAY_HTTP_PORT_BASE;
+/* Chosen port base and bind address. Overridable via argv or
+ * RELAY_PORT / RELAY_HOST env vars. The listener walks
+ * RELAY_HTTP_PORT_RANGE consecutive ports and binds the first free
+ * one, so N relay instances can coexist. */
+static int  g_relay_port_base = RELAY_HTTP_PORT_BASE;
+static char g_relay_host[64]  = RELAY_HTTP_HOST_DEFAULT;
 
 /* Set to 1 once the --- TOOLS --- preamble has been delivered in this
  * browser session. Cleared whenever the provider page navigates
@@ -98,11 +101,65 @@ static int g_relay_port_base = RELAY_HTTP_PORT_BASE;
  * history and the model forgets the tools. */
 static int g_tools_preamble_sent = 0;
 
-static void parse_port_override(int argc, char **argv) {
-  const char *ps = (argc > 1 && argv[1][0]) ? argv[1] : getenv("RELAY_PORT");
-  if (ps && ps[0]) {
-    int p = atoi(ps);
+static void parse_args(int argc, char **argv) {
+  /* Seed from env first, so flags override them. */
+  const char *env_port = getenv("RELAY_PORT");
+  if (env_port && env_port[0]) {
+    int p = atoi(env_port);
     if (p > 0 && p < 65535) g_relay_port_base = p;
+  }
+  const char *env_host = getenv("RELAY_HOST");
+  if (env_host && env_host[0]) {
+    snprintf(g_relay_host, sizeof(g_relay_host), "%s", env_host);
+  }
+
+  for (int i = 1; i < argc; i++) {
+    const char *a = argv[i];
+
+    if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+      printf(
+        "usage: %s [PORT] [--host ADDR] [--port PORT] [--listen-all]\n"
+        "\n"
+        "  PORT              base port (same as --port)\n"
+        "  --port PORT       base port for the HTTP listener\n"
+        "  --host ADDR       bind address (default " RELAY_HTTP_HOST_DEFAULT ")\n"
+        "  --listen-all      shortcut for --host 0.0.0.0\n"
+        "  -h, --help        show this help\n"
+        "\n"
+        "env: RELAY_PORT, RELAY_HOST\n"
+        "\n"
+        "The listener walks %d consecutive ports from the base and binds\n"
+        "the first free one. The bound address is printed to stdout and\n"
+        "shown in the window title.\n",
+        argv[0], RELAY_HTTP_PORT_RANGE);
+      _exit(0);
+    }
+
+    if (strcmp(a, "--port") == 0 && i + 1 < argc) {
+      int p = atoi(argv[++i]);
+      if (p > 0 && p < 65535) g_relay_port_base = p;
+      continue;
+    }
+    if (strcmp(a, "--host") == 0 && i + 1 < argc) {
+      snprintf(g_relay_host, sizeof(g_relay_host), "%s", argv[++i]);
+      continue;
+    }
+    if (strcmp(a, "--listen-all") == 0) {
+      snprintf(g_relay_host, sizeof(g_relay_host), "0.0.0.0");
+      continue;
+    }
+    if (a[0] != '-' && a[0] != '\0') {
+      /* positional: base port */
+      int p = atoi(a);
+      if (p > 0 && p < 65535) g_relay_port_base = p;
+      continue;
+    }
+  }
+
+  if (strcmp(g_relay_host, "0.0.0.0") == 0) {
+    printf("[relay] WARNING: --listen-all exposes the relay on every "
+           "interface with no authentication\n");
+    fflush(stdout);
   }
 }
 
@@ -700,9 +757,11 @@ static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
   if (cJSON_IsString(model) && model->valuestring[0]) {
     snprintf(model_name, sizeof(model_name), "%s", model->valuestring);
   } else {
-    snprintf(model_name, sizeof(model_name), "deepseek-web");
+    snprintf(model_name, sizeof(model_name), "model/default");
   }
 
+
+  
   char *prompt = build_browser_transcript(messages);
   if (!prompt) {
     cJSON_Delete(body);
@@ -824,19 +883,20 @@ static void *http_thread(void *arg) {
 
   int bound_port = 0;
   struct mg_connection *lst = NULL;
-  char addr[64];
+  char addr[96];
 
   for (int p = g_relay_port_base;
        p < g_relay_port_base + RELAY_HTTP_PORT_RANGE;
        p++) {
-    snprintf(addr, sizeof(addr), "http://0.0.0.0:%d", p);
+    snprintf(addr, sizeof(addr), "http://%s:%d", g_relay_host, p);
     lst = mg_http_listen(&mgr, addr, http_handler, NULL);
     if (lst) { bound_port = p; break; }
   }
 
   if (!lst) {
       fprintf(stderr,
-              "[relay] no free port in range %d-%d; is another relay running?\n",
+              "[relay] no free port in range %s:%d-%d; is another relay running?\n",
+              g_relay_host,
               g_relay_port_base,
               g_relay_port_base + RELAY_HTTP_PORT_RANGE - 1);
       relay_platform_set_title("relay - no free port");
@@ -844,18 +904,26 @@ static void *http_thread(void *arg) {
       return NULL;
   }
 
-  printf("[relay] HTTP API listening on 127.0.0.1:%d\n", bound_port);
+  /* Loopback is always advertised as 127.0.0.1 even when we bind
+   * 0.0.0.0, because that is the address a local client should use. */
+  const char *advertise_host =
+      (strcmp(g_relay_host, "0.0.0.0") == 0) ? "127.0.0.1" : g_relay_host;
+
+  printf("[relay] HTTP API listening on %s:%d\n", g_relay_host, bound_port);
   printf("[relay]   POST /v1/chat/completions\n");
-  printf("[relay]   wisp-code api_url: "
-        "http://127.0.0.1:%d/v1/chat/completions\n", bound_port);
+  printf("[relay]   api_url: "
+        "http://%s:%d/v1/chat/completions\n", advertise_host, bound_port);
+  if (strcmp(g_relay_host, "0.0.0.0") == 0) {
+      printf("[relay]   NOTE: bound to all interfaces (no auth)\n");
+  }
 
   /* Put the endpoint in the title bar so N relay windows are
   * distinguishable at a glance and the port is never a mystery. */
   {
-      char title[160];
+      char title[200];
       snprintf(title, sizeof(title),
-              "http://127.0.0.1:%d/v1/chat/completions",
-              bound_port);
+              "http://%s:%d/v1/chat/completions",
+              advertise_host, bound_port);
       relay_platform_set_title(title);
   }
 
@@ -885,7 +953,11 @@ static char *build_chooser_data_url(void) {
 
   APPEND(CHOOSER_HTML_HEAD);
   for (const provider_t *p = g_providers; p->id; p++) {
-      int active = (strcmp(p->id, "deepseek") == 0);
+    int active = (strcmp(p->id, "deepseek") == 0) ||
+                 (strcmp(p->id, "chatgpt")  == 0) ||
+                 (strcmp(p->id, "qwen")     == 0) ||
+                 (strcmp(p->id, "gemini")   == 0);
+
       const char *fmt =
           "<div class=\"card%s\" data-id=\"%s\" data-name=\"%s\" "
           "data-active=\"%d\" onclick=\"pick(this)\">"
@@ -952,6 +1024,9 @@ static char *build_chooser_data_url(void) {
 #include <gdk/gdkx.h>
 #include <X11/Xatom.h>
 #include <webkit2/webkit2.h>
+#include <glib/gstdio.h>
+#include <webkit2/webkit2.h>
+
 
 static WebKitWebView  *g_view = NULL;
 static struct webview *g_w    = NULL;
@@ -1226,7 +1301,7 @@ static gpointer stdin_thread(gpointer data) {
 int main(int argc, char **argv) {
    XInitThreads();  
   install_signal_traps();
-  parse_port_override(argc, argv);
+  parse_args(argc, argv);
 
   char *chooser = build_chooser_data_url();
 
@@ -1254,6 +1329,25 @@ int main(int argc, char **argv) {
   gtk_widget_realize(w.priv.window);
   install_close_handlers(&w);
   install_wm_delete(w.priv.window);
+
+
+  /* Persistent cookie jar only — no context surgery needed. */
+  WebKitWebView *view_for_cookies = WEBKIT_WEB_VIEW(w.priv.webview);
+  WebKitWebContext *ctx = webkit_web_view_get_context(view_for_cookies);
+  WebKitCookieManager *cm = webkit_web_context_get_cookie_manager(ctx);
+
+  char cookie_dir[700];
+  char cookie_path[760];
+  const char *home = getenv("HOME");
+  if (!home || !home[0]) home = "/tmp";
+  snprintf(cookie_dir, sizeof(cookie_dir),
+           "%s/.local/share/wisp-relay", home);
+  snprintf(cookie_path, sizeof(cookie_path),
+           "%s/cookies.sqlite", cookie_dir);
+  g_mkdir_with_parents(cookie_dir, 0700);
+
+  webkit_cookie_manager_set_persistent_storage(
+  cm, cookie_path, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
 
   /*
   static watchdog_ctx wd;
@@ -1483,14 +1577,14 @@ static gpointer stdin_thread(gpointer data) {
 
 int main(int argc, char **argv) {
   install_signal_traps();
-  parse_port_override(argc, argv);
+  parse_args(argc, argv);
 
   char *chooser = build_chooser_data_url();
 
   struct webview w;
   memset(&w, 0, sizeof(w));
   w.title     = "Starting...";
-  w.url       = chooser ? chooser : ""
+  w.url       = chooser ? chooser : "";
   w.width     = 1024;
   w.height    = 768;
   w.resizable = 1;
@@ -1695,7 +1789,7 @@ static DWORD WINAPI stdin_thread(LPVOID param) {
 
 int main(int argc, char **argv) {
   install_signal_traps();
-  parse_port_override(argc, argv);
+  parse_args(argc, argv);
 
   char *chooser = build_chooser_data_url();
 
@@ -1895,14 +1989,14 @@ static gpointer stdin_thread_mac(gpointer data) {
 
 int main(int argc, char **argv) {
   install_signal_traps();
-  parse_port_override(argc, argv);
+  parse_args(argc, argv);
 
   char *chooser = build_chooser_data_url();
 
   struct webview w;
   memset(&w, 0, sizeof(w));
   w.title     = "Starting...";
-  w.url       = chooser ? chooser : ""
+  w.url       = chooser ? chooser : "";
   w.width     = 1024;
   w.height    = 768;
   w.resizable = 1;

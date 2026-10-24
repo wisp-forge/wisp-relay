@@ -16,54 +16,74 @@ wisp-relay does not bundle API keys, does not add a billing layer, and does not 
 
 ---
 
-## Operational Providers
+## Supported Providers
 
-The list of providers that speak the OpenAI-compatible protocol grows every day. Because wisp-relay simply acts as a translation layer, if a service offers an OpenAI-compatible endpoint, you can use it here.
+wisp-relay fronts a real browser session against the provider's own web chat. You log in once, in the embedded WebView, and the relay drives the UI on your behalf.
 
 <p align="center">
-  <img src="docs/select.png" alt="wisp-relay">
+  <img src="docs/select.png" alt="wisp-relay provider chooser">
 </p>
 
-**Right now, DeepSeek is operational and blazing fast.**
-At the time of writing, DeepSeek (using `https://api.deepseek.com`) offers an exceptionally responsive and cost-effective way to run frontier-class models like `deepseek-flash` and `deepseek-v4-pro`. If you are looking for a high-performance default to plug into wisp-relay, this is it.
+| Provider | Status | Notes |
+|---|---|---|
+| **DeepSeek** | ✅ Operational | `chat.deepseek.com`. Fast, long context, free tier. |
+| **ChatGPT** | ✅ Operational | `chatgpt.com` / `chat.openai.com`. |
+| **Qwen Chat** | ✅ Operational | `chat.qwen.ai`. Typed input for short prompts, file upload for very long ones. |
+| **Gemini** | ✅ Operational | `gemini.google.com`. |
+| Claude | 🔜 Planned | `claude.ai`. |
+| Grok | 🔜 Planned | `grok.com`. |
+| Le Chat | 🔜 Planned | `chat.mistral.ai`. |
+| Copilot | 🔜 Planned | `copilot.microsoft.com`. |
+| Perplexity | 🔜 Planned | `www.perplexity.ai`. |
+| Kimi | 🔜 Planned | `kimi.moonshot.cn`. |
+| Lumo | 🔜 Planned | `lumo.proton.me`. |
 
-**Other providers you can plug in today (and more every week):**
+If you need an OpenAI-compatible HTTP provider instead of a browser front-end, check the [Related](#related) section below.
 
-- **OpenRouter** — Access to a massive catalog of models, including free tiers and routers.
-- **Groq / Cerebras** — For blisteringly fast inference on specific models.
-- **Mistral AI / Together AI / Fireworks** — Solid options for open-weight models.
-- **Google Gemini** — Through their OpenAI-compatible endpoint layer.
-- **Anthropic Claude** — Via their OpenAI-compatible "compatibility layer" (note: some advanced features like thinking blocks are not supported through this path).
-- **Local Models** — Ollama, vLLM, LiteLLM, or LM Studio running on your machine or your network.
+---
 
-The core strength of wisp-relay is that it abstracts the "where" away from the "what." You configure the upstream once, and every tool that speaks the OpenAI standard just works.
+## Tool Calling
+
+wisp-relay supports the OpenAI `tools[]` array end to end:
+
+1. On the first turn of a session, the tool catalogue is rendered into a
+   `--- TOOLS ---` preamble and prepended to the prompt.
+2. The browser model is instructed to emit tool calls as a fenced
+   ` ```tool_call ` block containing `{"name":...,"arguments":{...}}`.
+3. The relay parses those blocks out of the reply, converts them into
+   OpenAI-shaped `tool_calls[]`, sets `finish_reason: "tool_calls"`, and
+   strips the fence from the visible content.
+4. On the next turn, `tool` role messages and prior assistant
+   `tool_calls` are replayed in the transcript as `[tool_result <id>]`
+   and ` ```tool_call ` blocks so the model keeps context.
+
+The tool preamble is re-sent whenever the provider page navigates or
+reloads, because loading a URL wipes the browser conversation.
 
 ---
 
 ## How it Works
 
-1. **Configure:** Tell wisp-relay which upstream endpoint you want to use (e.g., DeepSeek, OpenRouter, or your local Ollama).
-2. **Point:** Tell your client application (like a code editor, a chat UI, or a script) to use `http://localhost:35673/v1/chat/completions`.
-3. **Go:** The client sends an OpenAI-format request to wisp-relay. wisp-relay forwards it to your chosen upstream and returns the response. No code changes needed on your client side.
+1. **Pick a provider.** Launch `wisp-relay`, choose a provider in the
+   embedded window, and click Connect. Log in if the provider asks.
+2. **Point your client.** Configure your tool (editor, script, chat UI)
+   to use `http://127.0.0.1:35673/v1/chat/completions`.
+3. **Go.** The client sends an OpenAI-format request. The relay injects
+   the transcript into the chat UI, waits for the reply to finish
+   (detected by a per-session terminator line the model is instructed to
+   emit), and returns an OpenAI-shaped response.
+
+No code changes on your client side. Multiple relay instances can run
+side by side; the listener walks `35673..35688` and binds the first free
+port, which is printed in the window title bar.
 
 <p align="center">
-  <img src="docs/deepseek.png" alt="wisp-relay">
+  <img src="docs/deepseek.png" alt="wisp-relay talking to DeepSeek">
 </p>
 
 ---
 
-## Related
+## Command-line options
 
-- [**wisp-code-free**](https://github.com/wisp-forge/wisp-code-free) —
-  the free edition. Lightweight, LLM-driven coding agent that runs in any
-  terminal. AGPL-3.0, full source.
-
-- [**wisp-code-pro**](https://github.com/wisp-forge/wisp-code-pro) — the
-  pro edition. Same agent, tuned for long sessions. Paid, with full
-  source under a commercial license.
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+```sh
+wisp-relay [PORT] [--host ADDR] [--port PORT] [--listen-all]
