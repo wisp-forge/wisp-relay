@@ -12,7 +12,13 @@
 wisp-relay is a lightweight, local HTTP server that translates the OpenAI API standard into anything you want. Point your favorite coding tools at `http://localhost:35673/v1/chat/completions` and let wisp-relay route the traffic to your actual provider of choice.
 
 **Bring your own key. No middleman.**
-wisp-relay does not bundle API keys, does not add a billing layer, and does not collect telemetry. You pay your upstream provider directly for what you use. The relay just handles the routing.
+wisp-relay does not bundle API keys, does not add a billing layer, and does not collect telemetry. For API-based providers you pay them directly for what you use. For browser-driven providers you use your existing account (which may be free or paid); wisp-relay adds no billing layer of its own. The relay just handles the routing.
+
+> **Note:** wisp-relay's browser-driven providers automate a provider's
+> web chat, which some providers prohibit in their terms of service.
+> Read [Terms of Service](#terms-of-service) at the end of this README
+> before using them. For a fully ToS-compliant setup, see
+> [Using OpenRouter](#using-openrouter-testing--legal-alternative).
 
 ---
 
@@ -38,7 +44,42 @@ wisp-relay fronts a real browser session against the provider's own web chat. Yo
 | Kimi | 🔜 Planned | `kimi.moonshot.cn`. |
 | Lumo | 🔜 Planned | `lumo.proton.me`. |
 
-If you need an OpenAI-compatible HTTP provider instead of a browser front-end, check the [Related](#related) section below.
+If you need an OpenAI-compatible HTTP provider instead of a browser front-end, see [Using OpenRouter](#using-openrouter-testing--legal-alternative) below.
+
+---
+
+## Using OpenRouter (testing / legal alternative)
+
+If you want to use wisp-relay **without touching any provider's web UI**
+— and therefore without the ToS concerns described at the end of this
+README — point it at [OpenRouter](https://openrouter.ai) instead.
+OpenRouter is an OpenAI-compatible aggregator with an official API, and
+it explicitly permits programmatic access. It is the recommended path
+for **testing** wisp-relay end-to-end without risking a provider account.
+
+```sh
+# 1. Get a key at https://openrouter.ai/keys
+# 2. Start wisp-relay pointed at OpenRouter as an upstream
+wisp-relay --upstream https://openrouter.ai/api/v1 \
+           --upstream-key "$OPENROUTER_API_KEY"
+
+# 3. Point your client at the local relay as usual
+curl http://localhost:35673/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+> **Note:** the `--upstream` / `--upstream-key` flags shown above are the
+> intended interface for an OpenAI-compatible upstream. If your build of
+> wisp-relay does not yet expose them, use OpenRouter directly as your
+> client's `api_url` (i.e. skip wisp-relay entirely) — the point is that
+> OpenRouter is the safe, ToS-compliant way to test the client
+> (`wisp-blend`) without browser automation.
+
+This is **for testing purposes** and for users who want a fully
+ToS-compliant setup. wisp-relay's browser-driven providers remain
+available for personal experimentation, but OpenRouter is the path of
+least resistance if you want to avoid the grey area entirely.
 
 ---
 
@@ -87,3 +128,28 @@ port, which is printed in the window title bar.
 
 ```sh
 wisp-relay [PORT] [--host ADDR] [--port PORT] [--listen-all]
+```
+
+---
+
+## Terms of Service
+
+wisp-relay automates the provider's **web chat interface** by driving a
+browser session on your behalf. This behaviour may violate the terms of
+service of some providers, which commonly prohibit "automated access",
+"bots", or "programmatic extraction of outputs".
+
+- You are solely responsible for reviewing and complying with each
+  provider's terms before using wisp-relay with that provider.
+- If a provider's terms prohibit automated access, **do not use
+  wisp-relay with that provider** — use their official API instead, or
+  use [OpenRouter](#using-openrouter-testing--legal-alternative) as
+  described above.
+- wisp-relay is provided **for personal experimentation and educational
+  purposes only**. Use it at your own risk. The authors accept no
+  liability for account restrictions, suspensions, or bans resulting
+  from its use.
+- **Recommended legal alternative:** use a provider that explicitly
+  allows API access, such as [OpenRouter](https://openrouter.ai). It is
+  a drop-in OpenAI-compatible endpoint with no browser automation
+  involved.
